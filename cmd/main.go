@@ -66,22 +66,37 @@ type Game struct {
 	Verbose          bool
 }
 
-// TODO: Make the Top pipe work
 func (g *Game) AddPipes(amount int) error {
 	for range amount {
-		// side := rand.Intn(2)
+		side := rand.Intn(3)
 		pipe := Pipes{
+			Top: &Pipe{
+				Mutex: &sync.Mutex{},
+			},
 			Bottom: &Pipe{
 				Mutex: &sync.Mutex{},
 			},
 		}
 		var err error
 
+		pipe.Top.Image, _, err = ebitenutil.NewImageFromFileSystem(assets.FS, "images/pipes/pipes.png")
+		if err != nil {
+			return err
+		}
+		pipe.Top.Height = rand.Intn(g.TrueBoundingBox.Dy()/2) + PIPE_PART_SPRITE_SIZE_HEIGHT
+
 		pipe.Bottom.Image, _, err = ebitenutil.NewImageFromFileSystem(assets.FS, "images/pipes/pipes.png")
 		if err != nil {
 			return err
 		}
-		pipe.Bottom.Height = rand.Intn(g.TrueBoundingBox.Dy()/2) + PIPE_PART_SPRITE_SIZE_HEIGHT
+		pipe.Bottom.Height = rand.Intn((g.TrueBoundingBox.Dy()-PIPE_PART_SPRITE_SIZE_HEIGHT*3-PLAYER_SPRITE_SIZE*3-pipe.Top.Height)-PIPE_PART_SPRITE_SIZE_HEIGHT) + PIPE_PART_SPRITE_SIZE_HEIGHT
+
+		switch side {
+		case 0:
+			pipe.Bottom = nil
+		case 1:
+			pipe.Top = nil
+		}
 
 		g.Pipes = append(g.Pipes, &pipe)
 	}
@@ -134,29 +149,42 @@ func (g *Game) Update() error {
 		g.Stage = STAGE_OVER
 	}
 
-	if len(g.Pipes) == 0 || g.Pipes[len(g.Pipes)-1].Bottom != nil && g.Pipes[len(g.Pipes)-1].Bottom.X < float64(g.TrueBoundingBox.Dx()) {
-		g.AddPipes(1)
+	if len(g.Pipes) == 0 {
+		if err := g.AddPipes(1); err != nil {
+			return err
+		}
+	} else if g.Pipes[len(g.Pipes)-1].Bottom != nil && g.Pipes[len(g.Pipes)-1].Bottom.X < float64(g.TrueBoundingBox.Dx()) {
+		if err := g.AddPipes(1); err != nil {
+			return err
+		}
+	} else if g.Pipes[len(g.Pipes)-1].Top != nil && g.Pipes[len(g.Pipes)-1].Top.X < float64(g.TrueBoundingBox.Dx()) {
+		if err := g.AddPipes(1); err != nil {
+			return err
+		}
 	}
 
 	for _, pipe := range g.Pipes {
-		// TODO: Enable top pipes and check their coords
-		if pipe.Bottom == nil {
-			continue
-		}
-		pipe.Bottom.Mutex.Lock()
+		if pipe.Bottom != nil {
+			pipe.Bottom.Mutex.Lock()
 
-		if g.Player.X+float64(PLAYER_SPRITE_SIZE) < pipe.Bottom.X || g.Player.X+float64(PLAYER_SPRITE_SIZE) > pipe.Bottom.X+float64(PIPE_PART_SPITE_SIZE_WIDTH) {
+			if g.Player.X+float64(PLAYER_SPRITE_SIZE) >= pipe.Bottom.X && g.Player.X+float64(PLAYER_SPRITE_SIZE) <= pipe.Bottom.X+float64(PIPE_PART_SPITE_SIZE_WIDTH) &&
+				g.Player.Y >= pipe.Bottom.Y-pipe.Bottom.RenderedHeight && g.Player.Y <= pipe.Bottom.Y {
+				g.Stage = STAGE_OVER
+			}
+
 			pipe.Bottom.Mutex.Unlock()
-			continue
 		}
 
-		if g.Player.Y < pipe.Bottom.Y-pipe.Bottom.RenderedHeight || g.Player.Y > pipe.Bottom.Y {
-			pipe.Bottom.Mutex.Unlock()
-			continue
-		}
+		if pipe.Top != nil {
+			pipe.Top.Mutex.Lock()
 
-		g.Stage = STAGE_OVER
-		pipe.Bottom.Mutex.Unlock()
+			if g.Player.X+float64(PLAYER_SPRITE_SIZE) >= pipe.Top.X && g.Player.X+float64(PLAYER_SPRITE_SIZE) <= pipe.Top.X+float64(PIPE_PART_SPITE_SIZE_WIDTH) &&
+				g.Player.Y <= pipe.Top.Y+pipe.Top.RenderedHeight && g.Player.Y >= pipe.Top.Y {
+				g.Stage = STAGE_OVER
+			}
+
+			pipe.Top.Mutex.Unlock()
+		}
 	}
 
 	if g.Ticks == ^uint64(0) {
@@ -207,7 +235,55 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 
 	for i, pipe := range g.Pipes {
-		if pipe.Bottom.Height > 0 {
+		if pipe.Top != nil && pipe.Top.Height > 0 {
+			// We use a Mutex here, because we need the RenderedHeight property when checking for collisions within the Update() method.
+			// The Draw() and Update() method are being executed within different goroutines, so in order to preserve data integrity (checking only after completely
+			// setting the RenderedHeight), we use a Mutex Lock here.
+			pipe.Top.Mutex.Lock()
+			pipe.Top.RenderedHeight = 0
+			pipe.Top.X = float64(g.TrueBoundingBox.Dx()) + float64(i*PIPE_PART_SPITE_SIZE_WIDTH*3) - float64(g.Ticks)
+			pipe.Top.Y = 0
+
+			opts := &ebiten.DrawImageOptions{}
+			opts.GeoM.Translate(pipe.Top.X, pipe.Top.Y)
+			screen.DrawImage(
+				pipe.Top.Image.SubImage(
+					image.Rect(0, 0, PIPE_PART_SPITE_SIZE_WIDTH, PIPE_PART_SPRITE_SIZE_HEIGHT),
+				).(*ebiten.Image),
+				opts,
+			)
+
+			pipe.Top.RenderedHeight += float64(PIPE_PART_SPRITE_SIZE_HEIGHT)
+
+			height := 1
+			for height <= pipe.Top.Height/PIPE_PART_SPRITE_SIZE_HEIGHT {
+				opts := &ebiten.DrawImageOptions{}
+				opts.GeoM.Translate(pipe.Top.X, pipe.Top.Y+float64(height)*float64(PIPE_PART_SPRITE_SIZE_HEIGHT))
+
+				screen.DrawImage(
+					pipe.Top.Image.SubImage(
+						image.Rect(0, PIPE_PART_SPRITE_SIZE_HEIGHT, PIPE_PART_SPITE_SIZE_WIDTH, PIPE_PART_SPRITE_SIZE_HEIGHT*2),
+					).(*ebiten.Image),
+					opts,
+				)
+
+				height += 1
+				pipe.Top.RenderedHeight += float64(PIPE_PART_SPRITE_SIZE_HEIGHT)
+			}
+
+			headerOpts := &ebiten.DrawImageOptions{}
+			headerOpts.GeoM.Translate(pipe.Top.X, pipe.Top.Y+float64(height)*float64(PIPE_PART_SPRITE_SIZE_HEIGHT))
+			screen.DrawImage(
+				pipe.Top.Image.SubImage(
+					image.Rect(0, 0, PIPE_PART_SPITE_SIZE_WIDTH, PIPE_PART_SPRITE_SIZE_HEIGHT),
+				).(*ebiten.Image),
+				headerOpts,
+			)
+			pipe.Top.RenderedHeight += float64(PIPE_PART_SPRITE_SIZE_HEIGHT)
+			pipe.Top.Mutex.Unlock()
+		}
+
+		if pipe.Bottom != nil && pipe.Bottom.Height > 0 {
 			// We use a Mutex here, because we need the RenderedHeight property when checking for collisions within the Update() method.
 			// The Draw() and Update() method are being executed within different goroutines, so in order to preserve data integrity (checking only after completely
 			// setting the RenderedHeight), we use a Mutex Lock here.
